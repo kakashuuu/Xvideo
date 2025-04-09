@@ -2,98 +2,103 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const puppeteer = require('puppeteer');
+const mime = require('mime-types');
+const path = require('path');
+const fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-app.use(express.json());
+const PORT = 1000;
+const HOST = '129.146.180.197'; // Your VPS IP
 
 app.get('/', (req, res) => {
   res.send('Xvideos API is working!');
 });
 
-// 1. Search videos
-app.get('/api/search', async (req, res) => {
-  const query = req.query.q;
-  if (!query) return res.status(400).json({ error: 'Query missing' });
+// Search Endpoint
+app.get('/search', async (req, res) => {
+  const { query } = req.query;
+  if (!query) return res.status(400).json({ error: 'Missing ?query=' });
 
-  const url = `https://www.xvideos.com/?k=${encodeURIComponent(query)}`;
+  const searchUrl = `https://www.xvideos.com/?k=${encodeURIComponent(query)}`;
   try {
-    const { data } = await axios.get(url);
+    const { data } = await axios.get(searchUrl);
     const $ = cheerio.load(data);
-
     const results = [];
-    $('div.mozaique > div').each((i, el) => {
-      const title = $(el).find('p.title a').text().trim();
-      const link = 'https://www.xvideos.com' + $(el).find('p.title a').attr('href');
-      const thumb = $(el).find('div.thumb img').attr('data-src') || $(el).find('div.thumb img').attr('src');
-      if (title && link && thumb) {
-        results.push({ title, link, thumb });
-      }
+
+    $('div.thumb-block').each((i, el) => {
+      const title = $(el).find('.title a').text().trim();
+      const url = 'https://www.xvideos.com' + $(el).find('.title a').attr('href');
+      const thumb = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
+      if (title && url) results.push({ title, url, thumb });
     });
 
-    res.json({ success: true, results });
-  } catch (err) {
+    res.json({ results });
+  } catch (e) {
     res.status(500).json({ error: 'Failed to fetch search results' });
   }
 });
 
-// 2. Get video info
-app.get('/api/video', async (req, res) => {
-  const url = req.query.url;
-  if (!url || !url.includes('xvideos.com/video')) return res.status(400).json({ error: 'Invalid video URL' });
+// Download Link Generator
+app.get('/download', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'Missing ?url=' });
 
   try {
-    const browser = await puppeteer.launch({ headless: true });
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2' });
 
-    const video = await page.evaluate(() => {
-      const title = document.querySelector('h2.page-title').innerText.trim();
-      const videoUrl = document.querySelector('video')?.getAttribute('src');
-      const thumbnail = document.querySelector('meta[property="og:image"]')?.content;
-      return { title, videoUrl, thumbnail };
+    const videoSrc = await page.evaluate(() => {
+      const video = document.querySelector('video');
+      return video ? video.src : null;
     });
 
     await browser.close();
 
-    if (!video.videoUrl) return res.status(404).json({ error: 'Video URL not found' });
+    if (!videoSrc) return res.status(404).json({ error: 'Video URL not found' });
 
-    res.json({ success: true, ...video });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch video' });
-  }
-});
+    const ext = mime.extension(mime.lookup(videoSrc) || 'video/mp4');
+    const filename = `${uuidv4()}.${ext}`;
+    const filePath = path.join(__dirname, 'downloads', filename);
 
-// 3. Force download
-app.get('/api/download', async (req, res) => {
-  const url = req.query.url;
-  if (!url || !url.includes('xvideos.com/video')) return res.status(400).json({ error: 'Invalid video URL' });
+    const writer = fs.createWriteStream(filePath);
+    const response = await axios.get(videoSrc, { responseType: 'stream' });
 
-  try {
-    const browser = await puppeteer.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2' });
+    response.data.pipe(writer);
 
-    const videoUrl = await page.evaluate(() => document.querySelector('video')?.getAttribute('src'));
-    await browser.close();
-
-    if (!videoUrl) return res.status(404).json({ error: 'Video URL not found' });
-
-    res.setHeader('Content-Disposition', 'attachment; filename=video.mp4');
-    res.setHeader('Content-Type', 'video/mp4');
-
-    const stream = await axios({
-      url: videoUrl,
-      method: 'GET',
-      responseType: 'stream',
+    writer.on('finish', () => {
+      const downloadLink = `http://${HOST}:${PORT}/file/${filename}`;
+      res.json({ title: path.basename(url), download: downloadLink });
     });
 
-    stream.data.pipe(res);
+    writer.on('error', () => {
+      res.status(500).json({ error: 'Failed to download video' });
+    });
   } catch (err) {
-    res.status(500).json({ error: 'Download failed' });
+    res.status(500).json({ error: 'Something went wrong', details: err.message });
   }
 });
 
-// Listen on all IPs
-app.listen(1000, '0.0.0.0', () => {
-  console.log('Xvideos API running on http://0.0.0.0:1000');
+// Serve File with Force Download
+app.get('/file/:filename', (req, res) => {
+  const filePath = path.join(__dirname, 'downloads', req.params.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File not found');
+
+  res.download(filePath, (err) => {
+    if (!err) {
+      fs.unlinkSync(filePath); // Delete after download
+    }
+  });
+});
+
+// Create downloads folder if doesn't exist
+const downloadsDir = path.join(__dirname, 'downloads');
+if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir);
+
+app.listen(PORT, HOST, () => {
+  console.log(`Xvideos API running on http://${HOST}:${PORT}`);
 });

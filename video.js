@@ -2,117 +2,98 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const puppeteer = require('puppeteer');
-const https = require('https');
-const http = require('http');
 
 const app = express();
-const BASE_URL = 'https://www.xvideos.com';
+app.use(express.json());
 
-// Endpoint 1: Search videos
+app.get('/', (req, res) => {
+  res.send('Xvideos API is working!');
+});
+
+// 1. Search videos
 app.get('/api/search', async (req, res) => {
-    const { q } = req.query;
-    if (!q) return res.status(400).json({ error: 'Missing query parameter ?q=' });
+  const query = req.query.q;
+  if (!query) return res.status(400).json({ error: 'Query missing' });
 
-    try {
-        const searchUrl = `${BASE_URL}/?k=${encodeURIComponent(q)}`;
-        const { data } = await axios.get(searchUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
+  const url = `https://www.xvideos.com/?k=${encodeURIComponent(query)}`;
+  try {
+    const { data } = await axios.get(url);
+    const $ = cheerio.load(data);
 
-        const $ = cheerio.load(data);
-        const results = [];
+    const results = [];
+    $('div.mozaique > div').each((i, el) => {
+      const title = $(el).find('p.title a').text().trim();
+      const link = 'https://www.xvideos.com' + $(el).find('p.title a').attr('href');
+      const thumb = $(el).find('div.thumb img').attr('data-src') || $(el).find('div.thumb img').attr('src');
+      if (title && link && thumb) {
+        results.push({ title, link, thumb });
+      }
+    });
 
-        $('.thumb-block').each((i, el) => {
-            const title = $(el).find('.title').text().trim();
-            const href = $(el).find('a').attr('href');
-            const link = href ? BASE_URL + href : null;
-            const thumbnail = $(el).find('img').attr('data-src');
-            const duration = $(el).find('.duration').text().trim();
-
-            if (title && link) {
-                results.push({ title, link, thumbnail, duration });
-            }
-        });
-
-        res.json({ results });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch search results', details: err.message });
-    }
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch search results' });
+  }
 });
 
-// Endpoint 2: Get video details (title, video src, thumbnail)
+// 2. Get video info
 app.get('/api/video', async (req, res) => {
-    const { url } = req.query;
-    if (!url || !url.startsWith(BASE_URL)) {
-        return res.status(400).json({ error: 'Invalid or missing ?url parameter' });
-    }
+  const url = req.query.url;
+  if (!url || !url.includes('xvideos.com/video')) return res.status(400).json({ error: 'Invalid video URL' });
 
-    try {
-        const browser = await puppeteer.launch({ headless: 'new' });
-        const page = await browser.newPage();
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
+  try {
+    const browser = await puppeteer.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle2' });
 
-        const videoData = await page.evaluate(() => {
-            const title = document.querySelector('h2.page-title')?.innerText;
-            const video = document.querySelector('video#html5video');
-            const src = video?.querySelector('source')?.src;
-            const poster = video?.getAttribute('poster');
-            const duration = document.querySelector('.video-duration')?.innerText;
-            return { title, video: src, poster, duration };
-        });
+    const video = await page.evaluate(() => {
+      const title = document.querySelector('h2.page-title').innerText.trim();
+      const videoUrl = document.querySelector('video')?.getAttribute('src');
+      const thumbnail = document.querySelector('meta[property="og:image"]')?.content;
+      return { title, videoUrl, thumbnail };
+    });
 
-        await browser.close();
+    await browser.close();
 
-        if (!videoData.video) {
-            return res.status(404).json({ error: 'Video not found on page' });
-        }
+    if (!video.videoUrl) return res.status(404).json({ error: 'Video URL not found' });
 
-        res.json(videoData);
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to extract video', details: err.message });
-    }
+    res.json({ success: true, ...video });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch video' });
+  }
 });
 
-// Endpoint 3: Force video download
+// 3. Force download
 app.get('/api/download', async (req, res) => {
-    const { url } = req.query;
-    if (!url || !url.startsWith(BASE_URL)) {
-        return res.status(400).json({ error: 'Invalid or missing ?url parameter' });
-    }
+  const url = req.query.url;
+  if (!url || !url.includes('xvideos.com/video')) return res.status(400).json({ error: 'Invalid video URL' });
 
-    try {
-        const browser = await puppeteer.launch({ headless: 'new' });
-        const page = await browser.newPage();
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
+  try {
+    const browser = await puppeteer.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle2' });
 
-        const videoUrl = await page.evaluate(() => {
-            const video = document.querySelector('video#html5video');
-            return video?.querySelector('source')?.src;
-        });
+    const videoUrl = await page.evaluate(() => document.querySelector('video')?.getAttribute('src'));
+    await browser.close();
 
-        await browser.close();
+    if (!videoUrl) return res.status(404).json({ error: 'Video URL not found' });
 
-        if (!videoUrl) return res.status(404).json({ error: 'Video URL not found' });
+    res.setHeader('Content-Disposition', 'attachment; filename=video.mp4');
+    res.setHeader('Content-Type', 'video/mp4');
 
-        const fileName = `xvideos_${Date.now()}.mp4`;
-        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-        res.setHeader('Content-Type', 'video/mp4');
+    const stream = await axios({
+      url: videoUrl,
+      method: 'GET',
+      responseType: 'stream',
+    });
 
-        const protocol = videoUrl.startsWith('https') ? https : http;
-        protocol.get(videoUrl, (stream) => {
-            stream.pipe(res);
-        }).on('error', (err) => {
-            res.status(500).json({ error: 'Failed to stream video', details: err.message });
-        });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to prepare download', details: err.message });
-    }
+    stream.data.pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: 'Download failed' });
+  }
 });
 
-app.listen(1000, () => {
-    console.log('Xvideos API running on http://localhost:1000');
+// Listen on all IPs
+app.listen(1000, '0.0.0.0', () => {
+  console.log('Xvideos API running on http://0.0.0.0:1000');
 });

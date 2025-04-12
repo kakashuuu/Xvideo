@@ -1,101 +1,95 @@
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import FileResponse
-from bs4 import BeautifulSoup
 import requests
-import os
-import shutil
+from bs4 import BeautifulSoup
+from fastapi import FastAPI
+from pydantic import BaseModel
 import uuid
+import os
 
 app = FastAPI()
 
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# Function to get video metadata
+def get_video_metadata(url: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3"
+    }
 
-@app.get("/")
-def home():
-    return {"status": "Xvideos API is up."}
+    # Get the page content
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        return {"error": "Failed to fetch page content"}
 
+    # Parse the page content using BeautifulSoup
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    # Extract video title
+    title_tag = soup.find('meta', {'name': 'title'})
+    title = title_tag['content'] if title_tag else 'Unknown Title'
+
+    # Extract video duration
+    duration_tag = soup.find('span', {'class': 'duration'})
+    duration = duration_tag.text.strip() if duration_tag else 'Unknown Duration'
+
+    # Extract views
+    views_tag = soup.find('span', {'class': 'viewcount'})
+    views = views_tag.text.strip() if views_tag else 'Unknown Views'
+
+    # Extract rating
+    rating_tag = soup.find('span', {'class': 'rating'})
+    rating = rating_tag.text.strip() if rating_tag else 'Unknown Rating'
+
+    # Extract thumbnail
+    thumbnail_tag = soup.find('meta', {'property': 'og:image'})
+    thumbnail = thumbnail_tag['content'] if thumbnail_tag else 'No Thumbnail'
+
+    # Extract video download URL (direct video link)
+    video_url_tag = soup.find('video', {'id': 'player'})
+    video_url = video_url_tag['src'] if video_url_tag else 'No Video URL'
+
+    return {
+        "title": title,
+        "duration": duration,
+        "views": views,
+        "rating": rating,
+        "thumbnail": thumbnail,
+        "direct_video_url": video_url
+    }
+
+# Endpoint for searching video
 @app.get("/search")
-def search(query: str = Query(...)):
-    url = f"https://www.xvideos.com/?k={query}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.content, "html.parser")
-    videos = []
-    for video in soup.select(".thumb-block"):
-        title_tag = video.select_one(".thumb-under a")
-        if not title_tag:
-            continue
-        href = title_tag.get("href")
-        title = title_tag.text.strip()
-        thumbnail = video.select_one("img")
-        duration = video.select_one("var.duration")
-        videos.append({
-            "title": title,
-            "link": f"https://www.xvideos.com{href}",
-            "thumbnail": thumbnail.get("data-src") or thumbnail.get("src") if thumbnail else None,
-            "duration": duration.text.strip() if duration else None
-        })
-    return {"results": videos}
+def search_video(query: str):
+    search_url = f"https://www.xvideos.com/?k={query}"
+    metadata = get_video_metadata(search_url)
+    if "error" in metadata:
+        return {"error": "Failed to search videos"}
+    return metadata
 
+# Download endpoint
 @app.get("/download")
-def download_video(url: str = Query(...)):
-    if "xvideos.com" not in url:
-        raise HTTPException(status_code=400, detail="Invalid Xvideos URL.")
+def download_video(url: str):
+    metadata = get_video_metadata(url)
+    if "error" in metadata:
+        return {"error": "Failed to fetch video metadata"}
 
-    headers = {"User-Agent": "Mozilla/5.0"}
-    res = requests.get(url, headers=headers)
-    soup = BeautifulSoup(res.content, "html.parser")
+    # Generate a unique filename
+    filename = str(uuid.uuid4()) + ".mp4"
+    file_path = f"./downloads/{filename}"
 
-    try:
-        title = soup.select_one("h2.page-title")
-        duration = soup.select_one("span.duration")
-        views = soup.select_one("strong.nb-views")
-        rating = soup.select_one("div.rating span.rating")
-        thumbnail = soup.select_one("meta[property='og:image']")
+    # Download the video and save it
+    video_url = metadata["direct_video_url"]
+    video_response = requests.get(video_url)
 
-        title = title.text.strip() if title else "Unknown Title"
-        duration = duration.text.strip() if duration else "Unknown Duration"
-        views = views.text.strip() if views else "Unknown Views"
-        rating = rating.text.strip() if rating else "Unknown Rating"
-        thumbnail = thumbnail["content"] if thumbnail else None
+    if video_response.status_code == 200:
+        os.makedirs('./downloads', exist_ok=True)
+        with open(file_path, 'wb') as f:
+            f.write(video_response.content)
+        return {"file": f"/file/{filename}"}
+    else:
+        return {"error": "Failed to download video"}
 
-        script_tag = next((s for s in soup.find_all("script") if "setVideoUrlHigh" in s.text), None)
-        if not script_tag:
-            raise Exception("Video script not found.")
-
-        video_url = None
-        for line in script_tag.text.splitlines():
-            if "setVideoUrlHigh" in line:
-                video_url = line.split("setVideoUrlHigh('")[1].split("')")[0]
-                break
-
-        if not video_url:
-            raise Exception("Video URL not found.")
-
-        filename = f"{uuid.uuid4()}.mp4"
-        filepath = os.path.join(DOWNLOAD_DIR, filename)
-
-        with requests.get(video_url, stream=True) as r:
-            with open(filepath, "wb") as f:
-                shutil.copyfileobj(r.raw, f)
-
-        return {
-            "title": title,
-            "duration": duration,
-            "views": views,
-            "rating": rating,
-            "thumbnail": thumbnail,
-            "direct_video_url": video_url,
-            "download": f"/file/{filename}"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
+# Endpoint to serve downloaded video
 @app.get("/file/{filename}")
-def serve_file(filename: str):
-    filepath = os.path.join(DOWNLOAD_DIR, filename)
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="File not found.")
-    return FileResponse(filepath, media_type='video/mp4', filename=filename)
+def get_file(filename: str):
+    file_path = f"./downloads/{filename}"
+    if os.path.exists(file_path):
+        return {"file_url": f"/{file_path}"}
+    return {"error": "File not found"}

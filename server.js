@@ -21,11 +21,7 @@ app.get("/search", async (req, res) => {
         $(".thumb-block").each((i, el) => {
             // Extract title, duration, and other details from the right parts of the HTML
             const title = $(el).find("a[title]").attr("title") || "Unknown";
-            let duration = $(el).find(".duration").text().trim() || "Unknown";
-
-            // Fix the duration to remove duplicates like '7 min7 min'
-            duration = duration.replace(/(\d+\s?min)+/, '$1').trim();
-
+            const duration = $(el).find(".duration").text().trim() || "Unknown";
             const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
             const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
 
@@ -51,18 +47,16 @@ app.get("/download", async (req, res) => {
 
         // Extract video title and duration from specific meta tags and elements
         const title = $("meta[property='og:title']").attr("content") || "Unknown";
-        let duration = $(".duration").text().trim() || "Unknown";
-
-        // Fix the duration formatting issue (duplicate 'min')
-        duration = duration.replace(/(\d+\s?min)+/, '$1').trim();
-
+        const duration = $(".duration").text().trim() || "Unknown";
         const thumbnail = $("meta[property='og:image']").attr("content") || "https://cdn.xvideos.com/default.jpg";
-        const videoUrlDirect = $("video source").attr("src");
 
+        // Try to get the video URL from the <video> or <source> tag
+        const videoUrlDirect = $("video source").attr("src") || $("source[type='video/mp4']").attr("src");
+
+        // If the video URL is found, return it
         if (videoUrlDirect) {
             res.json({
                 status: true,
-                creator: "Your Creator Name",
                 result: {
                     title,
                     duration,
@@ -74,6 +68,7 @@ app.get("/download", async (req, res) => {
             res.status(404).send({ error: "Video URL not found" });
         }
     } catch (error) {
+        console.error("Error fetching video details:", error);
         res.status(500).send({ error: "Failed to fetch video details" });
     }
 });

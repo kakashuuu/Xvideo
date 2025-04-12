@@ -1,114 +1,117 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import requests
 from bs4 import BeautifulSoup
-import httpx
 import os
-import uuid
-from urllib.parse import unquote, urlparse
+import shutil
+import random
+import string
+from tempfile import NamedTemporaryFile
 
 app = FastAPI()
 
-BASE_DIR = "downloads"
-os.makedirs(BASE_DIR, exist_ok=True)
+# Model to store the video data
+class VideoDetails(BaseModel):
+    title: str
+    views: str
+    vote: str
+    likes: str
+    dislikes: str
+    size: str
+    sizeB: int
+    thumb: str
+    url_dl: str
 
-# Helper to get video details from an Xvideos URL
-def get_video_details(video_url):
+
+def get_video_details(video_url: str):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = httpx.get(video_url, headers=headers)
-        soup = BeautifulSoup(res.text, "html.parser")
+        response = requests.get(video_url)
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-        title = soup.find("meta", property="og:title")
-        duration = soup.find("span", class_="duration")
-        views = soup.find("div", class_="views")
-        rating = soup.find("div", class_="rating")
-        thumbnail = soup.find("meta", property="og:image")
+        title = soup.find("meta", property="og:title")["content"]
+        views = soup.find("meta", property="og:description")["content"]
+        thumb = soup.find("meta", property="og:image")["content"]
+        direct_video_url = soup.find("meta", property="og:video")["content"] if soup.find("meta", property="og:video") else None
 
-        scripts = soup.find_all("script")
-        video_url = None
-        for script in scripts:
-            if "html5player.setVideoUrlHigh" in script.text:
-                for line in script.text.split("\n"):
-                    if "html5player.setVideoUrlHigh" in line:
-                        video_url = line.split("\"")[1]
-                        break
+        if not direct_video_url:
+            raise HTTPException(status_code=404, detail="Direct video URL not found")
+
+        # Example: Extracting more metadata like likes, dislikes, and size from the page
+        vote = "Unknown"
+        likes = "Unknown"
+        dislikes = "Unknown"
+        size = "Unknown"
+        sizeB = 0
+
+        return VideoDetails(
+            title=title,
+            views=views,
+            vote=vote,
+            likes=likes,
+            dislikes=dislikes,
+            size=size,
+            sizeB=sizeB,
+            thumb=thumb,
+            url_dl=direct_video_url
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching video details: {str(e)}")
+
+
+@app.get("/search")
+async def search(query: str):
+    search_url = f"https://www.xvideos.com/?k={query}"
+    details = get_video_details(search_url)
+    return {"status": True, "creator": "FG98", "result": details.dict()}
+
+
+@app.get("/download")
+async def download(url: str):
+    try:
+        video_details = get_video_details(url)
+
+        # Generate a unique filename
+        file_name = ''.join(random.choices(string.ascii_letters + string.digits, k=12)) + ".mp4"
+
+        # Download and save video temporarily
+        video_data = requests.get(video_details.url_dl)
+        with NamedTemporaryFile(delete=False, mode='wb') as temp_file:
+            temp_file.write(video_data.content)
+            temp_file.close()
+
+        # Creating the file path for downloading
+        download_path = os.path.join('/tmp', file_name)
+
+        # Rename and move file to /tmp
+        shutil.move(temp_file.name, download_path)
+
+        # Generate one-time token download URL (In real-world, you can integrate more complex token generation and expiry)
+        download_url = f"/serve/{file_name}"
+
+        # After the file is downloaded, automatically delete it
+        os.remove(download_path)
 
         return {
-            "title": title["content"] if title else "Unknown",
-            "duration": duration.text.strip() if duration else "Unknown",
-            "views": views.text.strip() if views else "Unknown",
-            "rating": rating.text.strip() if rating else "Unknown",
-            "thumbnail": thumbnail["content"] if thumbnail else "https://cdn.xvideos.com/default.jpg",
-            "direct_video_url": video_url
+            "status": True,
+            "creator": "FG98",
+            "result": {
+                "title": video_details.title,
+                "views": video_details.views,
+                "vote": video_details.vote,
+                "likes": video_details.likes,
+                "deslikes": video_details.dislikes,
+                "size": video_details.size,
+                "sizeB": video_details.sizeB,
+                "thumb": video_details.thumb,
+                "url_dl": download_url
+            }
         }
+
     except Exception as e:
-        print("Error:", e)
-        return None
+        raise HTTPException(status_code=500, detail=f"Error processing download request: {str(e)}")
 
-# Endpoint: /search?query=
-@app.get("/search")
-def search(query: str):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        url = f"https://www.xvideos.com/?k={query}"
-        res = httpx.get(url, headers=headers)
-        soup = BeautifulSoup(res.text, "html.parser")
-        results = []
-        for thumb in soup.select(".thumb-block")[:10]:
-            a_tag = thumb.select_one("a")
-            if not a_tag:
-                continue
-            video_url = f"https://www.xvideos.com{a_tag['href']}"
-            title = a_tag.get("title") or a_tag.text.strip()
-            duration = thumb.select_one(".duration")
-            details = get_video_details(video_url)
-            if details:
-                results.append({
-                    "title": details['title'] or title,
-                    "duration": details['duration'] or (duration.text.strip() if duration else "Unknown Duration"),
-                    "url": video_url,
-                    "thumbnail": details['thumbnail'],
-                    "direct_video_url": details['direct_video_url']
-                })
-        return results
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint: /download?url=
-@app.get("/download")
-def download(url: str):
-    decoded_url = unquote(url)
-    details = get_video_details(decoded_url)
-    if details and details.get("direct_video_url"):
-        video_url = details["direct_video_url"]
-        filename = f"{uuid.uuid4().hex}.mp4"
-        filepath = os.path.join(BASE_DIR, filename)
-
-        with httpx.stream("GET", video_url) as r:
-            with open(filepath, "wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
-
-        # Generate a one-time token
-        token = uuid.uuid4().hex
-        token_path = os.path.join(BASE_DIR, token)
-        os.rename(filepath, token_path)
-
-        return JSONResponse({
-            "title": details['title'],
-            "token_url": f"/file/{token}"
-        })
-
-    raise HTTPException(status_code=404, detail="Video or download link not found")
-
-# Serve and delete the file after download
-@app.get("/file/{token}")
-def serve_file(token: str):
-    filepath = os.path.join(BASE_DIR, token)
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    def delete_after_response():
-        os.remove(filepath)
-
-    return FileResponse(filepath, media_type="video/mp4", filename=f"video.mp4", background=delete_after_response)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=9000)

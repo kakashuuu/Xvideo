@@ -43,7 +43,7 @@ def get_video_metadata(url: str):
 
     # Extract video download URL (direct video link)
     video_url_tag = soup.find('video', {'id': 'player'})
-    video_url = video_url_tag['src'] if video_url_tag else 'No Video URL'
+    video_url = video_url_tag['src'] if video_url_tag else None  # Changed to None if not found
 
     return {
         "title": title,
@@ -70,14 +70,18 @@ def download_video(url: str):
     if "error" in metadata:
         return {"error": "Failed to fetch video metadata"}
 
+    video_url = metadata["direct_video_url"]
+
+    # Check if a valid video URL is available
+    if not video_url:
+        return {"error": "Video URL is not available"}
+
     # Generate a unique filename
     filename = str(uuid.uuid4()) + ".mp4"
     file_path = f"./downloads/{filename}"
 
     # Download the video and save it
-    video_url = metadata["direct_video_url"]
     video_response = requests.get(video_url)
-
     if video_response.status_code == 200:
         os.makedirs('./downloads', exist_ok=True)
         with open(file_path, 'wb') as f:

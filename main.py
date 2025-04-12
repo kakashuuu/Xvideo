@@ -2,16 +2,16 @@ import os
 import uuid
 import requests
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from bs4 import BeautifulSoup
 
 app = FastAPI()
 
-# Path where videos will be stored
+# Path where videos will be stored temporarily
 VIDEO_DIR = './videos'
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
-# Helper function to download video
+# Helper function to download the video
 def download_video(url: str, filename: str):
     video_response = requests.get(url, stream=True)
     if video_response.status_code == 200:
@@ -57,6 +57,21 @@ def delete_video(filename: str):
     file_path = os.path.join(VIDEO_DIR, filename)
     if os.path.exists(file_path):
         os.remove(file_path)
+
+@app.get("/search")
+async def search(query: str):
+    # Construct the search URL
+    search_url = f"https://www.xvideos.com/?k={query}"
+    
+    # Get the video details from the first search result
+    video_details = get_video_details(search_url)
+    
+    # Return the video details
+    return {
+        "title": video_details["title"],
+        "duration": "Unknown Duration",  # Static for now, can be extracted if needed
+        "url": video_details["url"]
+    }
 
 @app.get("/download")
 async def download(url: str, background_tasks: BackgroundTasks):

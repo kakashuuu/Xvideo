@@ -1,106 +1,96 @@
-// xvideos-api.js
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
+import aiohttp
+import os
+import uuid
+from bs4 import BeautifulSoup
+import mimetypes
+from pathlib import Path
+from playwright.async_api import async_playwright
 
-const express = require('express');
-const axios = require('axios');
-const cheerio = require('cheerio');
-const puppeteer = require('puppeteer');
-const mime = require('mime-types');
-const path = require('path');
-const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
+app = FastAPI()
 
-const app = express();
-const PORT = 1000;
-const HOST = '129.146.180.197'; // Your VPS IP
+HOST = "129.146.180.197"
+PORT = 9000
+DOWNLOAD_DIR = Path("downloads")
+DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-app.get('/', (req, res) => {
-  res.send('Xvideos API is working!');
-});
+class SearchResult(BaseModel):
+    title: str
+    url: str
+    thumb: str | None = None
 
-// Search Endpoint
-app.get('/search', async (req, res) => {
-  const { query } = req.query;
-  if (!query) return res.status(400).json({ error: 'Missing ?query=' });
+@app.get("/")
+async def root():
+    return {"message": "Xvideos API is working!"}
 
-  const searchUrl = `https://www.xvideos.com/?k=${encodeURIComponent(query)}`;
-  try {
-    const { data } = await axios.get(searchUrl);
-    const $ = cheerio.load(data);
-    const results = [];
+@app.get("/search")
+async def search(query: str = Query(...)):
+    search_url = f"https://www.xvideos.com/?k={query.replace(' ', '+')}"
+    results = []
 
-    $('div.thumb-block').each((i, el) => {
-      const title = $(el).find('.title a').text().trim();
-      const url = 'https://www.xvideos.com' + $(el).find('.title a').attr('href');
-      const thumb = $(el).find('img').attr('data-src') || $(el).find('img').attr('src');
-      if (title && url) results.push({ title, url, thumb });
-    });
+    async with aiohttp.ClientSession() as session:
+        async with session.get(search_url) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=500, detail="Failed to fetch search results")
+            text = await response.text()
+            soup = BeautifulSoup(text, "html.parser")
+            blocks = soup.select(".thumb-block")
+            for block in blocks:
+                a_tag = block.select_one(".title a")
+                img_tag = block.select_one("img")
+                if a_tag:
+                    title = a_tag.text.strip()
+                    url = f"https://www.xvideos.com{a_tag.get('href')}"
+                    thumb = img_tag.get("data-src") or img_tag.get("src") if img_tag else None
+                    results.append(SearchResult(title=title, url=url, thumb=thumb))
 
-    res.json({ results });
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to fetch search results' });
-  }
-});
+    return JSONResponse(content={"results": [r.dict() for r in results]})
 
-// Download Link Generator
-app.get('/download', async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).json({ error: 'Missing ?url=' });
+@app.get("/download")
+async def download(url: str = Query(...)):
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto(url, timeout=60000)
+            await page.wait_for_selector("video")
+            video_url = await page.eval_on_selector("video", "el => el.src")
+            await browser.close()
 
-  try {
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
-    });
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2' });
+        if not video_url:
+            raise HTTPException(status_code=404, detail="Video URL not found")
 
-    const videoSrc = await page.evaluate(() => {
-      const video = document.querySelector('video');
-      return video ? video.src : null;
-    });
+        file_ext = mimetypes.guess_extension(mimetypes.guess_type(video_url)[0]) or ".mp4"
+        filename = f"{uuid.uuid4()}{file_ext}"
+        filepath = DOWNLOAD_DIR / filename
 
-    await browser.close();
+        async with aiohttp.ClientSession() as session:
+            async with session.get(video_url) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=500, detail="Failed to download video")
+                with open(filepath, "wb") as f:
+                    while True:
+                        chunk = await resp.content.read(1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
 
-    if (!videoSrc) return res.status(404).json({ error: 'Video URL not found' });
+        return {"title": Path(url).name, "download": f"http://{HOST}:{PORT}/file/{filename}"}
 
-    const ext = mime.extension(mime.lookup(videoSrc) || 'video/mp4');
-    const filename = `${uuidv4()}.${ext}`;
-    const filePath = path.join(__dirname, 'downloads', filename);
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    const writer = fs.createWriteStream(filePath);
-    const response = await axios.get(videoSrc, { responseType: 'stream' });
-
-    response.data.pipe(writer);
-
-    writer.on('finish', () => {
-      const downloadLink = `http://${HOST}:${PORT}/file/${filename}`;
-      res.json({ title: path.basename(url), download: downloadLink });
-    });
-
-    writer.on('error', () => {
-      res.status(500).json({ error: 'Failed to download video' });
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Something went wrong', details: err.message });
-  }
-});
-
-// Serve File with Force Download
-app.get('/file/:filename', (req, res) => {
-  const filePath = path.join(__dirname, 'downloads', req.params.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).send('File not found');
-
-  res.download(filePath, (err) => {
-    if (!err) {
-      fs.unlinkSync(filePath); // Delete after download
-    }
-  });
-});
-
-// Create downloads folder if doesn't exist
-const downloadsDir = path.join(__dirname, 'downloads');
-if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir);
-
-app.listen(PORT, HOST, () => {
-  console.log(`Xvideos API running on http://${HOST}:${PORT}`);
-});
+@app.get("/file/{filename}")
+async def serve_file(filename: str):
+    filepath = DOWNLOAD_DIR / filename
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        path=filepath,
+        filename=filename,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        background=lambda: filepath.unlink()
+    )

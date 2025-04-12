@@ -18,16 +18,23 @@ app.get("/search", async (req, res) => {
         const $ = cheerio.load(response.data);
         const results = [];
 
+        // Debugging: Output the entire HTML to see the structure
+        console.log(response.data);
+
         // Scraping video details
         $(".thumb-block").each((i, el) => {
-            // Title extraction: First try the 'a' tag title attribute
+            // Try fetching title directly from meta tags or check the structure
             let title = $(el).find("a").attr("title");
             if (!title) {
-                // If no title in 'a' tag, try using the 'meta' tag or 'og:title' if available
-                title = $("meta[property='og:title']").attr("content") || "Unknown";
+                title = $("meta[property='og:title']").attr("content");
             }
 
-            // Duration extraction: Handle both known and alternative locations for duration
+            // Handle empty title case and provide a fallback
+            if (!title) {
+                console.log("Could not find title in element", $(el));  // Debug output
+                title = "Unknown";
+            }
+
             let duration = $(el).find(".duration").text().trim() || "Unknown";
             if (duration === "Unknown") {
                 const altDuration = $(el).find(".thumb-meta span").text().trim() || "Unknown";
@@ -66,6 +73,9 @@ app.get("/download", async (req, res) => {
     try {
         const response = await axios.get(videoUrl);
         const $ = cheerio.load(response.data);
+
+        // Debugging: Output the entire HTML to check for title
+        console.log(response.data);
 
         const title = $("meta[property='og:title']").attr("content") || "Unknown";
         const views = $(".views").text().trim() || "Unknown Views";

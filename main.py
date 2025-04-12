@@ -1,42 +1,42 @@
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import FileResponse
+from bs4 import BeautifulSoup
+import requests
 import os
 import shutil
 import uuid
-import requests
-from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse
-from pathlib import Path
 
 app = FastAPI()
+
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-
 @app.get("/")
-def root():
-    return {"message": "Xvideos API is up!"}
-
+def home():
+    return {"status": "Xvideos API is up."}
 
 @app.get("/search")
-def search_videos(query: str = Query(...)):
-    url = f"https://www.xvideos.com/?k={query.replace(' ', '+')}"
+def search(query: str = Query(...)):
+    url = f"https://www.xvideos.com/?k={query}"
     headers = {"User-Agent": "Mozilla/5.0"}
-
     res = requests.get(url, headers=headers)
     soup = BeautifulSoup(res.content, "html.parser")
-    results = []
-
+    videos = []
     for video in soup.select(".thumb-block"):
-        title = video.select_one(".title").text.strip() if video.select_one(".title") else None
-        video_url = "https://www.xvideos.com" + video.select_one("a")["href"]
-        thumb = video.select_one("img")["data-src"] if video.select_one("img") else None
-
-        if title and video_url:
-            results.append({"title": title, "url": video_url, "thumbnail": thumb})
-
-    return results[:10]
-
+        title_tag = video.select_one(".thumb-under a")
+        if not title_tag:
+            continue
+        href = title_tag.get("href")
+        title = title_tag.text.strip()
+        thumbnail = video.select_one("img")
+        duration = video.select_one("var.duration")
+        videos.append({
+            "title": title,
+            "link": f"https://www.xvideos.com{href}",
+            "thumbnail": thumbnail.get("data-src") or thumbnail.get("src") if thumbnail else None,
+            "duration": duration.text.strip() if duration else None
+        })
+    return {"results": videos}
 
 @app.get("/download")
 def download_video(url: str = Query(...)):
@@ -48,11 +48,17 @@ def download_video(url: str = Query(...)):
     soup = BeautifulSoup(res.content, "html.parser")
 
     try:
-        title = soup.select_one("h2.page-title").text.strip()
-        duration = soup.select_one("span.duration").text.strip()
-        views = soup.select_one("strong.nb-views").text.strip()
-        rating = soup.select_one("div.rating span.rating").text.strip()
-        thumbnail = soup.select_one("meta[property='og:image']")["content"]
+        title = soup.select_one("h2.page-title")
+        duration = soup.select_one("span.duration")
+        views = soup.select_one("strong.nb-views")
+        rating = soup.select_one("div.rating span.rating")
+        thumbnail = soup.select_one("meta[property='og:image']")
+
+        title = title.text.strip() if title else "Unknown Title"
+        duration = duration.text.strip() if duration else "Unknown Duration"
+        views = views.text.strip() if views else "Unknown Views"
+        rating = rating.text.strip() if rating else "Unknown Rating"
+        thumbnail = thumbnail["content"] if thumbnail else None
 
         script_tag = next((s for s in soup.find_all("script") if "setVideoUrlHigh" in s.text), None)
         if not script_tag:
@@ -87,22 +93,9 @@ def download_video(url: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
 @app.get("/file/{filename}")
-def get_file(filename: str):
+def serve_file(filename: str):
     filepath = os.path.join(DOWNLOAD_DIR, filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found.")
-
-    def delete_file(path):
-        try:
-            os.remove(path)
-        except Exception:
-            pass
-
-    response = FileResponse(filepath, media_type="application/octet-stream", filename=filename)
-    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
-    # Schedule delete after response
-    from threading import Timer
-    Timer(5.0, delete_file, [filepath]).start()
-    return response
+    return FileResponse(filepath, media_type='video/mp4', filename=filename)

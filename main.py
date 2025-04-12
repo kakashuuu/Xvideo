@@ -1,107 +1,115 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from bs4 import BeautifulSoup
-import requests, os, uuid, shutil
-from urllib.parse import quote_plus
-from threading import Timer
+import requests
+import os
+import uuid
+from urllib.parse import unquote
+import threading
 
 app = FastAPI()
+DOWNLOAD_FOLDER = "downloads"
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+tokens = {}
 
-VIDEO_DIR = "downloads"
-os.makedirs(VIDEO_DIR, exist_ok=True)
+# Helper to delete file after serving
+def delete_file_after(filepath: str, delay: int = 5):
+    import time
+    time.sleep(delay)
+    if os.path.exists(filepath):
+        os.remove(filepath)
 
-def get_video_details(url: str):
+# Extract video info from a valid video URL
+def get_video_details(video_url: str):
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Failed to fetch video page")
+    res = requests.get(video_url, headers=headers)
+    soup = BeautifulSoup(res.text, "html.parser")
 
-    soup = BeautifulSoup(response.content, "html.parser")
-    title = soup.find("title").text.strip().replace(" - XVIDEOS.COM", "")
-    views = soup.select_one(".rating-total-txt").text.strip() if soup.select_one(".rating-total-txt") else "Unknown Views"
-    rating = soup.select_one("#video_rating")["data-rating"] if soup.select_one("#video_rating") else "Unknown Rating"
+    title = soup.find("meta", property="og:title")["content"]
+    duration = soup.find("span", class_="duration").text.strip() if soup.find("span", class_="duration") else "Unknown"
+    views = soup.find("strong", class_="mobile-hide").text.strip() if soup.find("strong", class_="mobile-hide") else "Unknown"
+    rating = soup.find("span", class_="rating").text.strip() if soup.find("span", class_="rating") else "Unknown"
+    thumbnail = soup.find("meta", property="og:image")["content"]
 
-    thumb_meta = soup.find("meta", property="og:image")
-    thumbnail = thumb_meta["content"] if thumb_meta else "https://cdn.xvideos.com/default.jpg"
-
-    scripts = soup.find_all("script")
-    video_url = None
-    for script in scripts:
+    # Direct video file from 'html5player.setVideoUrlHigh'
+    direct_url = None
+    for script in soup.find_all("script"):
         if "html5player.setVideoUrlHigh" in script.text:
-            try:
-                start = script.text.index("html5player.setVideoUrlHigh('") + len("html5player.setVideoUrlHigh('")
-                end = script.text.index("')", start)
-                video_url = script.text[start:end]
-                break
-            except:
-                pass
+            start = script.text.find("html5player.setVideoUrlHigh('") + len("html5player.setVideoUrlHigh('")
+            end = script.text.find("')", start)
+            direct_url = script.text[start:end]
+            break
 
     return {
         "title": title,
+        "duration": duration,
         "views": views,
         "rating": rating,
         "thumbnail": thumbnail,
-        "url": url,
-        "direct_video_url": video_url
+        "url": video_url,
+        "direct_video_url": direct_url
     }
 
+# Filter only /video links
+def extract_video_url(query: str):
+    search_url = f"https://www.xvideos.com/?k={query}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res = requests.get(search_url, headers=headers)
+    soup = BeautifulSoup(res.text, "html.parser")
+    links = soup.select(".thumb-block a")
+
+    for link in links:
+        href = link.get("href", "")
+        if href.startswith("/video"):
+            return "https://www.xvideos.com" + href
+    return None
+
+# Search Endpoint
 @app.get("/search")
 def search(query: str):
-    search_url = f"https://www.xvideos.com/?k={quote_plus(query)}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(search_url, headers=headers)
-    soup = BeautifulSoup(response.content, "html.parser")
-    first_result = soup.select_one(".thumb-block a")
-    if not first_result:
-        return {"error": "No results found"}
-    video_url = "https://www.xvideos.com" + first_result["href"]
+    video_url = extract_video_url(query)
+    if not video_url:
+        raise HTTPException(status_code=404, detail="No video result found")
+
     details = get_video_details(video_url)
     return details
 
+# Download Endpoint
 @app.get("/download")
-def download(url: str, request: Request):
+def download(url: str):
+    url = unquote(url)
     details = get_video_details(url)
-    if not details["direct_video_url"]:
-        return {"error": "Video URL is not available"}
+    direct_url = details.get("direct_video_url")
 
-    # Download the video
-    video_id = str(uuid.uuid4())
-    filename = f"{video_id}.mp4"
-    filepath = os.path.join(VIDEO_DIR, filename)
-    with requests.get(details["direct_video_url"], stream=True) as r:
-        with open(filepath, "wb") as f:
-            shutil.copyfileobj(r.raw, f)
+    if not direct_url:
+        raise HTTPException(status_code=400, detail="Video URL is not available")
 
-    # Generate one-time token
-    token = str(uuid.uuid4())
-    token_map[token] = filepath
+    file_name = f"{uuid.uuid4()}.mp4"
+    file_path = os.path.join(DOWNLOAD_FOLDER, file_name)
 
-    # Auto delete after 5 minutes if not downloaded
-    Timer(300, lambda: token_map.pop(token, None)).start()
+    with requests.get(direct_url, stream=True) as r:
+        with open(file_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
 
-    # Return download link
-    host = request.client.host
+    token = uuid.uuid4().hex
+    tokens[token] = file_path
+
     return {
-        "message": "Video is ready",
-        "title": details["title"],
-        "views": details["views"],
-        "size": f"{round(os.path.getsize(filepath)/1024/1024, 2)} MB",
-        "link": f"http://{host}:9000/file/{token}"
+        "message": "Use this URL to download your video once",
+        "download_url": f"/getvideo/{token}"
     }
 
-token_map = {}
+# Serve one-time video and delete after download
+@app.get("/getvideo/{token}")
+def get_video(token: str):
+    if token not in tokens:
+        raise HTTPException(status_code=404, detail="Invalid or expired token")
 
-@app.get("/file/{token}")
-def serve_file(token: str):
-    filepath = token_map.pop(token, None)
-    if not filepath or not os.path.exists(filepath):
-        return {"error": "Invalid or expired token"}
+    file_path = tokens.pop(token)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
 
-    def delete_file(path):
-        try:
-            os.remove(path)
-        except:
-            pass
-
-    Timer(1, delete_file, args=[filepath]).start()
-    return FileResponse(filepath, media_type="video/mp4", filename=os.path.basename(filepath))
+    # Serve file and delete after short delay
+    threading.Thread(target=delete_file_after, args=(file_path,)).start()
+    return FileResponse(file_path, media_type="video/mp4", filename=os.path.basename(file_path))

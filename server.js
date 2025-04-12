@@ -17,14 +17,18 @@ app.get("/search", async (req, res) => {
         const response = await axios.get(searchUrl);
         const $ = cheerio.load(response.data);
         const results = [];
-        
+
+        // Scraping video details
         $(".thumb-block").each((i, el) => {
             const title = $(el).find("a").attr("title") || "Unknown";
-            const duration = $(el).find(".duration").text() || "Unknown";
+            const duration = $(el).find(".duration").text().trim() || "Unknown";
             const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
             const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
 
-            results.push({ title, duration, url, thumbnail });
+            // Handling strange cases like "11 min11 min"
+            const cleanDuration = duration.replace(/(\d+)\s*\1/, "$1");
+
+            results.push({ title, duration: cleanDuration, url, thumbnail });
         });
 
         if (results.length === 0) {

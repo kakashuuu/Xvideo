@@ -20,16 +20,21 @@ app.get("/search", async (req, res) => {
 
         // Scraping video details
         $(".thumb-block").each((i, el) => {
-            const title = $(el).find("a").attr("title") || "Unknown";
+            // Title extraction: First try the 'a' tag title attribute
+            let title = $(el).find("a").attr("title");
+            if (!title) {
+                // If no title in 'a' tag, try using the 'meta' tag or 'og:title' if available
+                title = $("meta[property='og:title']").attr("content") || "Unknown";
+            }
 
-            // Directly extract the duration
+            // Duration extraction: Handle both known and alternative locations for duration
             let duration = $(el).find(".duration").text().trim() || "Unknown";
             if (duration === "Unknown") {
                 const altDuration = $(el).find(".thumb-meta span").text().trim() || "Unknown";
                 duration = altDuration;
             }
 
-            // Clean the duration field (e.g., "1 min11 min" -> "1 min")
+            // Clean duration field (e.g., "1 min11 min" -> "1 min")
             if (duration.match(/\d+\smin.*\d+\smin/)) {
                 duration = duration.replace(/(\d+\smin).*\1/, "$1");
             }

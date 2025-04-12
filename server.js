@@ -25,13 +25,16 @@ app.get("/search", async (req, res) => {
             const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
             const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
 
-            // Clean the duration field (e.g., "1 min11 min" -> "1 min")
-            duration = duration.replace(/(\d+\smin)(\d+\smin)/, "$1");
+            // Log the raw duration for debugging
+            console.log("Raw Duration:", duration);
 
-            console.log("Title:", title);
-            console.log("Duration:", duration);
-            console.log("URL:", url);
-            console.log("Thumbnail:", thumbnail);
+            // Clean the duration field (e.g., "1 min11 min" -> "1 min")
+            // Remove any duplicates and ensure only one instance of 'min' appears
+            if (duration.match(/\d+\smin.*\d+\smin/)) {
+                duration = duration.replace(/(\d+\smin).*\1/, "$1");
+            }
+
+            console.log("Cleaned Duration:", duration);
 
             results.push({ title, duration, url, thumbnail });
         });

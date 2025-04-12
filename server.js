@@ -21,7 +21,11 @@ app.get("/search", async (req, res) => {
         $(".thumb-block").each((i, el) => {
             // Extract title, duration, and other details from the right parts of the HTML
             const title = $(el).find("a[title]").attr("title") || "Unknown";
-            const duration = $(el).find(".duration").text().trim() || "Unknown";
+            let duration = $(el).find(".duration").text().trim() || "Unknown";
+
+            // Fix the duration to remove duplicates like '7 min7 min'
+            duration = duration.replace(/(\d+\s?min)+/, '$1').trim();
+
             const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
             const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
 
@@ -47,7 +51,11 @@ app.get("/download", async (req, res) => {
 
         // Extract video title and duration from specific meta tags and elements
         const title = $("meta[property='og:title']").attr("content") || "Unknown";
-        const duration = $(".duration").text().trim() || "Unknown";
+        let duration = $(".duration").text().trim() || "Unknown";
+
+        // Fix the duration formatting issue (duplicate 'min')
+        duration = duration.replace(/(\d+\s?min)+/, '$1').trim();
+
         const thumbnail = $("meta[property='og:image']").attr("content") || "https://cdn.xvideos.com/default.jpg";
         const videoUrlDirect = $("video source").attr("src");
 

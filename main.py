@@ -1,16 +1,13 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 from bs4 import BeautifulSoup
-import requests
-import uuid
-import os
-from typing import Dict
+import requests, os, uuid, shutil
+from urllib.parse import quote_plus
 from threading import Timer
 
 app = FastAPI()
-VIDEO_DIR = "temp"
-TOKENS: Dict[str, str] = {}
 
+VIDEO_DIR = "downloads"
 os.makedirs(VIDEO_DIR, exist_ok=True)
 
 def get_video_details(url: str):
@@ -20,15 +17,15 @@ def get_video_details(url: str):
         raise HTTPException(status_code=400, detail="Failed to fetch video page")
 
     soup = BeautifulSoup(response.content, "html.parser")
-
     title = soup.find("title").text.strip().replace(" - XVIDEOS.COM", "")
     views = soup.select_one(".rating-total-txt").text.strip() if soup.select_one(".rating-total-txt") else "Unknown Views"
     rating = soup.select_one("#video_rating")["data-rating"] if soup.select_one("#video_rating") else "Unknown Rating"
-    thumbnail = soup.find("meta", property="og:image")["content"]
 
-    # Extract direct video link from script
+    thumb_meta = soup.find("meta", property="og:image")
+    thumbnail = thumb_meta["content"] if thumb_meta else "https://cdn.xvideos.com/default.jpg"
+
     scripts = soup.find_all("script")
-    video_url = "No Video URL"
+    video_url = None
     for script in scripts:
         if "html5player.setVideoUrlHigh" in script.text:
             try:
@@ -50,78 +47,61 @@ def get_video_details(url: str):
 
 @app.get("/search")
 def search(query: str):
-    search_url = f"https://www.xvideos.com/?k={query}"
+    search_url = f"https://www.xvideos.com/?k={quote_plus(query)}"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(search_url, headers=headers)
-    if response.status_code != 200:
-        raise HTTPException(status_code=400, detail="Search failed")
-
     soup = BeautifulSoup(response.content, "html.parser")
-    first_result = soup.find("div", class_="thumb-inside")
+    first_result = soup.select_one(".thumb-block a")
     if not first_result:
-        raise HTTPException(status_code=404, detail="No videos found")
-
-    video_link = first_result.find("a", href=True)
-    if not video_link:
-        raise HTTPException(status_code=404, detail="No valid link")
-
-    video_url = "https://www.xvideos.com" + video_link['href']
+        return {"error": "No results found"}
+    video_url = "https://www.xvideos.com" + first_result["href"]
     details = get_video_details(video_url)
-    
-    return {
-        "title": details["title"],
-        "views": details["views"],
-        "rating": details["rating"],
-        "thumbnail": details["thumbnail"],
-        "url": video_url
-    }
+    return details
 
 @app.get("/download")
-def download(url: str):
+def download(url: str, request: Request):
     details = get_video_details(url)
-    video_url = details["direct_video_url"]
-
-    if video_url == "No Video URL":
+    if not details["direct_video_url"]:
         return {"error": "Video URL is not available"}
 
-    filename = f"{uuid.uuid4()}.mp4"
+    # Download the video
+    video_id = str(uuid.uuid4())
+    filename = f"{video_id}.mp4"
     filepath = os.path.join(VIDEO_DIR, filename)
+    with requests.get(details["direct_video_url"], stream=True) as r:
+        with open(filepath, "wb") as f:
+            shutil.copyfileobj(r.raw, f)
 
-    try:
-        with requests.get(video_url, stream=True) as r:
-            r.raise_for_status()
-            with open(filepath, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
-
+    # Generate one-time token
     token = str(uuid.uuid4())
-    TOKENS[token] = filepath
+    token_map[token] = filepath
 
+    # Auto delete after 5 minutes if not downloaded
+    Timer(300, lambda: token_map.pop(token, None)).start()
+
+    # Return download link
+    host = request.client.host
     return {
+        "message": "Video is ready",
         "title": details["title"],
         "views": details["views"],
-        "likes": "Unknown",
-        "dislikes": "Unknown",
-        "votes": "Unknown",
-        "size": f"{round(os.path.getsize(filepath) / 1024 / 1024, 2)} MB",
-        "source_url": url,
-        "download": f"/file/{token}"
+        "size": f"{round(os.path.getsize(filepath)/1024/1024, 2)} MB",
+        "link": f"http://{host}:9000/file/{token}"
     }
 
+token_map = {}
+
 @app.get("/file/{token}")
-def get_file(token: str):
-    if token not in TOKENS:
-        raise HTTPException(status_code=404, detail="Invalid or expired token")
+def serve_file(token: str):
+    filepath = token_map.pop(token, None)
+    if not filepath or not os.path.exists(filepath):
+        return {"error": "Invalid or expired token"}
 
-    filepath = TOKENS.pop(token)
-
-    def delete_file():
+    def delete_file(path):
         try:
-            os.remove(filepath)
+            os.remove(path)
         except:
             pass
 
-    Timer(3.0, delete_file).start()
+    Timer(1, delete_file, args=[filepath]).start()
     return FileResponse(filepath, media_type="video/mp4", filename=os.path.basename(filepath))

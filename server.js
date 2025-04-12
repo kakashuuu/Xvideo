@@ -4,7 +4,7 @@ const cheerio = require("cheerio");
 const app = express();
 const port = 9000;
 
-// Search endpoint to get video details based on the query
+// Search endpoint to get video details
 app.get("/search", async (req, res) => {
     const query = req.query.query;
     if (!query) {
@@ -21,16 +21,21 @@ app.get("/search", async (req, res) => {
         // Debugging: Output the entire HTML to see the structure
         console.log(response.data);
 
-        // Scraping video details
         $(".thumb-block").each((i, el) => {
-            // Try fetching title directly from meta tags or check the structure
             let title = $(el).find("a").attr("title");
+            
+            // Check meta tags if the title is not found
             if (!title) {
                 title = $("meta[property='og:title']").attr("content");
             }
 
-            // Handle empty title case and provide a fallback
+            // If title is still unknown, try extracting from other places
             if (!title) {
+                title = $("h1").text() || $("h2").text() || "Unknown";
+            }
+
+            // Handle empty title case and provide a fallback
+            if (!title || title.trim() === "") {
                 console.log("Could not find title in element", $(el));  // Debug output
                 title = "Unknown";
             }

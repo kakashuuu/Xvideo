@@ -21,27 +21,21 @@ app.get("/search", async (req, res) => {
         // Scraping video details
         $(".thumb-block").each((i, el) => {
             const title = $(el).find("a").attr("title") || "Unknown";
+
+            // Directly extract the duration
             let duration = $(el).find(".duration").text().trim() || "Unknown";
-            const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
-            const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
-
-            // Log the raw duration for debugging
-            console.log("Raw Duration:", duration);
-
-            // Try another way to fetch the duration if not found
             if (duration === "Unknown") {
                 const altDuration = $(el).find(".thumb-meta span").text().trim() || "Unknown";
-                console.log("Alternative Duration:", altDuration);
                 duration = altDuration;
             }
 
             // Clean the duration field (e.g., "1 min11 min" -> "1 min")
-            // Remove any duplicates and ensure only one instance of 'min' appears
             if (duration.match(/\d+\smin.*\d+\smin/)) {
                 duration = duration.replace(/(\d+\smin).*\1/, "$1");
             }
 
-            console.log("Cleaned Duration:", duration);
+            const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
+            const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
 
             results.push({ title, duration, url, thumbnail });
         });

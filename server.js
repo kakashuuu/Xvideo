@@ -18,25 +18,22 @@ app.get("/search", async (req, res) => {
         const $ = cheerio.load(response.data);
         const results = [];
 
-        // Debugging: Log the raw HTML to see the exact structure of the elements
-        console.log("Raw HTML for search results:", response.data);
-
         // Scraping video details
         $(".thumb-block").each((i, el) => {
             const title = $(el).find("a").attr("title") || "Unknown";
-            const duration = $(el).find(".duration").text().trim() || "Unknown";
+            let duration = $(el).find(".duration").text().trim() || "Unknown";
             const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
             const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
 
-            // Handle duplicate durations, like "11 min11 min"
-            const cleanDuration = duration.replace(/(\d+)\s*\1/, "$1");
+            // Clean the duration field (e.g., "1 min11 min" -> "1 min")
+            duration = duration.replace(/(\d+\smin)(\d+\smin)/, "$1");
 
             console.log("Title:", title);
-            console.log("Duration:", cleanDuration);
+            console.log("Duration:", duration);
             console.log("URL:", url);
             console.log("Thumbnail:", thumbnail);
 
-            results.push({ title, duration: cleanDuration, url, thumbnail });
+            results.push({ title, duration, url, thumbnail });
         });
 
         if (results.length === 0) {

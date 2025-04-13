@@ -53,7 +53,9 @@ app.get("/fetch", async (req, res) => {
 
         // Navigate to the video page
         await page.goto(videoPageUrl, { waitUntil: "networkidle2", timeout: 60000 });
-        await page.waitForTimeout(5000); // wait for video to load
+        
+        // Wait for video to load (use a selector that indicates the video is loaded)
+        await page.waitFor("video");  // Modify this to a relevant selector on the page
 
         const title = await page.title();
 

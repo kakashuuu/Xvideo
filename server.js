@@ -1,49 +1,28 @@
 const express = require("express");
-const axios = require("axios");
-const cheerio = require("cheerio");
 const puppeteer = require("puppeteer");
-const { v4: uuidv4 } = require("uuid");
+const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const uuidv4 = require("uuid").v4;
 
 const app = express();
 const port = 9000;
+
+// Directory to save videos
 const VIDEO_DIR = path.join(__dirname, "videos");
-if (!fs.existsSync(VIDEO_DIR)) fs.mkdirSync(VIDEO_DIR);
-
-const TEMP_LINKS = {};
-
-function log(...args) {
-    console.log("[LOG]", ...args);
+if (!fs.existsSync(VIDEO_DIR)) {
+    fs.mkdirSync(VIDEO_DIR);
 }
 
-// 1. SEARCH endpoint
-app.get("/search", async (req, res) => {
-    const query = req.query.query;
-    if (!query) return res.status(400).send({ error: "Query is required" });
+// Temporary links (for 5 minutes expiration)
+const TEMP_LINKS = {};
 
-    try {
-        const searchUrl = `https://www.xvideos.com/?k=${encodeURIComponent(query)}`;
-        const response = await axios.get(searchUrl);
-        const $ = cheerio.load(response.data);
-        const results = [];
+// Utility function for logging
+const log = (message) => {
+    console.log(`[${new Date().toISOString()}] ${message}`);
+};
 
-        $(".thumb-block").each((_, el) => {
-            const title = $(el).find("a[title]").attr("title") || "Unknown";
-            const duration = $(el).find(".duration").first().text().trim().replace(/(\d+ min).*\1/, "$1") || "Unknown";
-            const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
-            const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
-            results.push({ title, duration, url, thumbnail });
-        });
-
-        res.json(results);
-    } catch (err) {
-        console.error("[SEARCH ERROR]", err.message);
-        res.status(500).send({ error: "Failed to fetch search results" });
-    }
-});
-
-// 2. FETCH endpoint
+// Fetch video by URL
 app.get("/fetch", async (req, res) => {
     const videoPageUrl = req.query.url;
     if (!videoPageUrl) return res.status(400).send({ error: "URL is required" });
@@ -54,23 +33,32 @@ app.get("/fetch", async (req, res) => {
     try {
         browser = await puppeteer.launch({
             headless: true,
-            executablePath: "/usr/bin/chromium-browser", // Confirm with `which chromium-browser`
+            executablePath: "/usr/bin/chromium-browser",
             args: ["--no-sandbox", "--disable-setuid-sandbox"]
         });
 
         const page = await browser.newPage();
-        await page.goto(videoPageUrl, { waitUntil: "networkidle2" });
+        let videoUrl = null;
 
-        const videoUrl = await page.evaluate(() => {
-            const videoTag = document.querySelector("video > source");
-            return videoTag ? videoTag.src : null;
+        // Intercept requests to capture the MP4 URL
+        await page.setRequestInterception(true);
+        page.on('request', request => {
+            const reqUrl = request.url();
+            if (reqUrl.endsWith(".mp4")) {
+                videoUrl = reqUrl; // Capture video URL
+                log("[FETCH] Intercepted MP4:", videoUrl);
+            }
+            request.continue();
         });
 
-        if (!videoUrl) {
-            throw new Error("Video URL not found");
-        }
+        // Navigate to the video page
+        await page.goto(videoPageUrl, { waitUntil: "networkidle2", timeout: 60000 });
+        await page.waitForTimeout(5000); // wait for video to load
 
         const title = await page.title();
+
+        if (!videoUrl) throw new Error("Video URL not found after interception");
+
         const filename = `${uuidv4()}.mp4`;
         const filepath = path.join(VIDEO_DIR, filename);
 
@@ -82,21 +70,26 @@ app.get("/fetch", async (req, res) => {
             responseType: "stream"
         });
 
+        // Pipe the response data to the local file
         response.data.pipe(writer);
 
         writer.on("finish", () => {
+            // Generate a temporary token and store the video link
             const token = uuidv4();
             TEMP_LINKS[token] = {
                 path: filepath,
-                expires: Date.now() + 5 * 60 * 1000 // expires in 5 min
+                expires: Date.now() + 5 * 60 * 1000 // Expires after 5 minutes
             };
 
             const downloadUrl = `http://play.leviihosting.shop:${port}/video/${token}`;
             log("[FETCH] Download complete:", filename);
+
+            // Send response with video details and download URL
             res.json({
                 status: true,
                 title,
-                downloadUrl
+                downloadUrl,
+                videoUrl // include raw video URL for debugging
             });
         });
 
@@ -113,27 +106,26 @@ app.get("/fetch", async (req, res) => {
     }
 });
 
-// 3. One-time video access
+// Serve the video file (temporary download link)
 app.get("/video/:token", (req, res) => {
     const token = req.params.token;
-    const record = TEMP_LINKS[token];
+    const videoData = TEMP_LINKS[token];
 
-    if (!record) return res.status(404).send("Invalid or expired link");
-
-    if (Date.now() > record.expires) {
-        fs.unlink(record.path, () => {});
-        delete TEMP_LINKS[token];
-        return res.status(410).send("Link expired");
+    if (!videoData || Date.now() > videoData.expires) {
+        return res.status(404).send({ error: "Link expired or not found" });
     }
 
-    res.download(record.path, (err) => {
-        if (!err) {
-            fs.unlink(record.path, () => {});
-            delete TEMP_LINKS[token];
+    const filePath = videoData.path;
+    res.sendFile(filePath, (err) => {
+        if (err) {
+            log("[VIDEO ERROR] Failed to send video file", err);
+            res.status(500).send({ error: "Failed to send video" });
+        } else {
+            log("[VIDEO] Sent video successfully");
         }
     });
 });
 
 app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+    log(`Server running at http://localhost:${port}`);
 });

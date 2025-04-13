@@ -1,31 +1,36 @@
 const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
+const puppeteer = require("puppeteer");
+const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
-const puppeteer = require("puppeteer");
+
 const app = express();
 const port = 9000;
+const VIDEO_DIR = path.join(__dirname, "videos");
+if (!fs.existsSync(VIDEO_DIR)) fs.mkdirSync(VIDEO_DIR);
 
-const DOWNLOAD_DIR = path.join(__dirname, "downloads");
-if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
+const TEMP_LINKS = {};
 
-const tokens = {}; // Store one-time tokens
+function log(...args) {
+    console.log("[LOG]", ...args);
+}
 
-// Search endpoint
+// 1. SEARCH endpoint
 app.get("/search", async (req, res) => {
     const query = req.query.query;
     if (!query) return res.status(400).send({ error: "Query is required" });
 
     try {
-        const response = await axios.get(`https://www.xvideos.com/?k=${encodeURIComponent(query)}`);
+        const searchUrl = `https://www.xvideos.com/?k=${encodeURIComponent(query)}`;
+        const response = await axios.get(searchUrl);
         const $ = cheerio.load(response.data);
         const results = [];
 
-        $(".thumb-block").each((i, el) => {
+        $(".thumb-block").each((_, el) => {
             const title = $(el).find("a[title]").attr("title") || "Unknown";
-            const duration = $(el).find(".duration").first().text().trim().replace(/(\d+ min).*\1/, "$1");
+            const duration = $(el).find(".duration").first().text().trim().replace(/(\d+ min).*\1/, "$1") || "Unknown";
             const url = "https://www.xvideos.com" + $(el).find("a").attr("href");
             const thumbnail = $(el).find("img").attr("data-src") || "https://cdn.xvideos.com/default.jpg";
             results.push({ title, duration, url, thumbnail });
@@ -34,92 +39,97 @@ app.get("/search", async (req, res) => {
         res.json(results);
     } catch (err) {
         console.error("[SEARCH ERROR]", err.message);
-        res.status(500).json({ error: "Failed to fetch search results" });
+        res.status(500).send({ error: "Failed to fetch search results" });
     }
 });
 
-// Fetch & download endpoint
+// 2. FETCH endpoint
 app.get("/fetch", async (req, res) => {
     const videoPageUrl = req.query.url;
-    if (!videoPageUrl) return res.status(400).json({ error: "URL is required" });
+    if (!videoPageUrl) return res.status(400).send({ error: "URL is required" });
+
+    log("[FETCH] Launching browser...");
+    let browser;
 
     try {
-        console.log("[FETCH] Launching browser...");
-        const browser = await puppeteer.launch({
+        browser = await puppeteer.launch({
             headless: true,
+            executablePath: "/usr/bin/chromium-browser", // Confirm with `which chromium-browser`
             args: ["--no-sandbox", "--disable-setuid-sandbox"]
         });
+
         const page = await browser.newPage();
         await page.goto(videoPageUrl, { waitUntil: "networkidle2" });
 
         const videoUrl = await page.evaluate(() => {
-            const source = document.querySelector("video > source");
-            return source ? source.src : null;
+            const videoTag = document.querySelector("video > source");
+            return videoTag ? videoTag.src : null;
         });
 
-        const title = await page.title();
-        await browser.close();
-
         if (!videoUrl) {
-            console.error("[FETCH ERROR] Video URL not found.");
-            return res.status(404).json({ error: "Video URL not found" });
+            throw new Error("Video URL not found");
         }
 
-        console.log(`[DOWNLOAD] Downloading from ${videoUrl}`);
-        const videoName = `video_${Date.now()}.mp4`;
-        const savePath = path.join(DOWNLOAD_DIR, videoName);
-        const writer = fs.createWriteStream(savePath);
+        const title = await page.title();
+        const filename = `${uuidv4()}.mp4`;
+        const filepath = path.join(VIDEO_DIR, filename);
 
+        log("[FETCH] Downloading video...");
+        const writer = fs.createWriteStream(filepath);
         const response = await axios({
-            method: "get",
             url: videoUrl,
+            method: "GET",
             responseType: "stream"
         });
 
         response.data.pipe(writer);
 
         writer.on("finish", () => {
-            const token = crypto.randomBytes(8).toString("hex");
-            tokens[token] = {
-                path: savePath,
-                expires: Date.now() + 5 * 60 * 1000 // 5 minutes
+            const token = uuidv4();
+            TEMP_LINKS[token] = {
+                path: filepath,
+                expires: Date.now() + 5 * 60 * 1000 // expires in 5 min
             };
 
-            console.log(`[SUCCESS] Video saved. Access via /watch/${token}`);
+            const downloadUrl = `http://play.leviihosting.shop:${port}/video/${token}`;
+            log("[FETCH] Download complete:", filename);
             res.json({
                 status: true,
-                title: title,
-                url: `http://play.leviihosting.shop:${port}/watch/${token}`
+                title,
+                downloadUrl
             });
         });
 
         writer.on("error", (err) => {
-            console.error("[FILE WRITE ERROR]", err.message);
-            res.status(500).json({ error: "Failed to save video" });
+            log("[FETCH ERROR] Write error", err);
+            res.status(500).send({ error: "Failed to save video" });
         });
 
     } catch (err) {
-        console.error("[FETCH ERROR]", err.message);
-        res.status(500).json({ error: "Failed to fetch video" });
+        log("[FETCH ERROR]", err.message);
+        res.status(500).send({ error: err.message });
+    } finally {
+        if (browser) await browser.close();
     }
 });
 
-// Serve downloaded file via token
-app.get("/watch/:token", (req, res) => {
-    const tokenData = tokens[req.params.token];
-    if (!tokenData) return res.status(404).send("Invalid or expired token");
+// 3. One-time video access
+app.get("/video/:token", (req, res) => {
+    const token = req.params.token;
+    const record = TEMP_LINKS[token];
 
-    if (Date.now() > tokenData.expires) {
-        fs.unlinkSync(tokenData.path); // delete expired
-        delete tokens[req.params.token];
-        return res.status(410).send("Token expired");
+    if (!record) return res.status(404).send("Invalid or expired link");
+
+    if (Date.now() > record.expires) {
+        fs.unlink(record.path, () => {});
+        delete TEMP_LINKS[token];
+        return res.status(410).send("Link expired");
     }
 
-    res.sendFile(tokenData.path, {}, (err) => {
+    res.download(record.path, (err) => {
         if (!err) {
-            fs.unlinkSync(tokenData.path); // delete after one-time access
-            delete tokens[req.params.token];
-            console.log(`[CLEANUP] Deleted file after access: ${tokenData.path}`);
+            fs.unlink(record.path, () => {});
+            delete TEMP_LINKS[token];
         }
     });
 });

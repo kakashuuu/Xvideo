@@ -45,12 +45,7 @@ app.get("/download", async (req, res) => {
         const response = await axios.get(videoUrl);
         const $ = cheerio.load(response.data);
 
-        // Extract video title and duration from specific meta tags and elements
-        const title = $("meta[property='og:title']").attr("content") || "Unknown";
-        const duration = $(".duration").text().trim() || "Unknown";
-        const thumbnail = $("meta[property='og:image']").attr("content") || "https://cdn.xvideos.com/default.jpg";
-
-        // Try to get the video URL from the <video> or <source> tag
+        // Extract direct video URL from <video> or <source> tag
         const videoUrlDirect = $("video source").attr("src") || $("source[type='video/mp4']").attr("src");
 
         // If the video URL is found, return it
@@ -58,9 +53,6 @@ app.get("/download", async (req, res) => {
             res.json({
                 status: true,
                 result: {
-                    title,
-                    duration,
-                    thumbnail,
                     url_dl: videoUrlDirect
                 }
             });
